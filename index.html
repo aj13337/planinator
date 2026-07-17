@@ -55,6 +55,13 @@ header {
 .plan-bar.open { max-height: 56px; }
 .plan-bar-inner { display: flex; align-items: center; gap: 10px; padding: 10px 16px; }
 .plan-bar-lbl { color: rgba(255,255,255,.6); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.settings-bar { background: #162d4a; overflow: hidden; max-height: 0; transition: max-height .25s ease; flex-shrink: 0; }
+.settings-bar.open { max-height: 80px; }
+.settings-bar-inner { display: flex; align-items: center; gap: 16px; padding: 10px 16px; flex-wrap: wrap; }
+.setting-group { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.setting-lbl { color: rgba(255,255,255,.6); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.setting-val  { color: #fff; font-size: 11px; font-weight: 700; white-space: nowrap; min-width: 44px; }
+.setting-group input[type=range] { flex: 1; min-width: 0; accent-color: #4f46e5; height: 4px; cursor: pointer; }
 .plan-input {
   flex: 1; min-width: 0; background: rgba(255,255,255,.12); border: none;
   border-radius: 10px; color: #fff; font-size: 14px; font-weight: 600;
@@ -154,6 +161,7 @@ header {
 <header>
   <div class="app-name">🎢 Cedar Point</div>
   <div style="display:flex;align-items:center;gap:6px">
+    <button class="plan-btn" id="settingsBtn" onclick="toggleSettings()">⚙</button>
     <button class="plan-btn" id="planBtn" onclick="togglePlan()">Plan</button>
     <div class="gps-pill">
       <div class="gps-pip searching" id="gpsPip"></div>
@@ -161,6 +169,21 @@ header {
     </div>
   </div>
 </header>
+
+<div class="settings-bar" id="settingsBar">
+  <div class="settings-bar-inner">
+    <div class="setting-group">
+      <span class="setting-lbl">Walk speed</span>
+      <input type="range" min="0.6" max="2.2" step="0.1" value="1.2" id="walkSlider" oninput="onSettingsChange()">
+      <span class="setting-val" id="walkVal">2.7 mph</span>
+    </div>
+    <div class="setting-group">
+      <span class="setting-lbl">Break after ride</span>
+      <input type="range" min="0" max="15" step="1" value="2" id="breakSlider" oninput="onSettingsChange()">
+      <span class="setting-val" id="breakVal">2 min</span>
+    </div>
+  </div>
+</div>
 
 <div class="plan-bar" id="planBar">
   <div class="plan-bar-inner">
@@ -288,8 +311,8 @@ const RIDE_MODEL = {
 //  ALGORITHM
 // ═══════════════════════════════════════════════════════════════════════════
 
-const WALK_SPEED = 1.2;   // m/s
-const BREAK_S    = 120;   // seconds cooldown after each ride
+let WALK_SPEED = 1.2;   // m/s  — configurable via settings bar
+let BREAK_S    = 120;   // seconds cooldown after each ride
 function haversine(la1, lo1, la2, lo2) {
   const R = 6371000, r = Math.PI / 180;
   const dLa = (la2-la1)*r, dLo = (lo2-lo1)*r;
@@ -468,6 +491,28 @@ let planTime  = null;
 
 const PARK_LAT = 41.4793;
 const PARK_LON = -82.6850;
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SETTINGS
+// ═══════════════════════════════════════════════════════════════════════════
+
+function toggleSettings() {
+  const bar = document.getElementById('settingsBar');
+  const btn = document.getElementById('settingsBtn');
+  const open = bar.classList.toggle('open');
+  btn.classList.toggle('plan-active', open);
+}
+
+function onSettingsChange() {
+  const mps  = parseFloat(document.getElementById('walkSlider').value);
+  const mins = parseInt(document.getElementById('breakSlider').value, 10);
+  const mph  = (mps * 2.23694).toFixed(1);
+  document.getElementById('walkVal').textContent  = mph + ' mph';
+  document.getElementById('breakVal').textContent = mins + ' min';
+  WALK_SPEED = mps;
+  BREAK_S    = mins * 60;
+  if (myRides.length) buildRoute();
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  PLAN MODE
