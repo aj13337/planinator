@@ -56,7 +56,7 @@ header {
 .plan-bar-inner { display: flex; align-items: center; gap: 10px; padding: 10px 16px; }
 .plan-bar-lbl { color: rgba(255,255,255,.6); font-size: 12px; font-weight: 600; white-space: nowrap; }
 .settings-bar { background: #162d4a; overflow: hidden; max-height: 0; transition: max-height .25s ease; flex-shrink: 0; }
-.settings-bar.open { max-height: 80px; }
+.settings-bar.open { max-height: 140px; }
 .settings-bar-inner { display: flex; align-items: center; gap: 16px; padding: 10px 16px; flex-wrap: wrap; }
 .setting-group { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
 .setting-lbl { color: rgba(255,255,255,.6); font-size: 11px; font-weight: 600; white-space: nowrap; }
@@ -73,6 +73,7 @@ header {
   padding: 6px 12px; cursor: pointer; white-space: nowrap;
 }
 .plan-live-btn:active { background: rgba(255,255,255,.32); }
+.plan-live-btn.plan-active { background: #4f46e5; }
 #scrollArea {
   flex: 1; overflow-y: auto; overflow-x: hidden;
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding-bottom: 16px;
@@ -181,6 +182,14 @@ header {
       <span class="setting-lbl">Break after ride</span>
       <input type="range" min="0" max="15" step="1" value="2" id="breakSlider" oninput="onSettingsChange()">
       <span class="setting-val" id="breakVal">2 min</span>
+    </div>
+    <div class="setting-group" style="flex-basis:100%">
+      <span class="setting-lbl">Fill day</span>
+      <button class="plan-live-btn" id="allDayBtn" onclick="toggleAllDay()">Off</button>
+      <span id="dayCloseWrap" style="display:none;align-items:center;gap:6px;flex:1">
+        <span class="setting-lbl" style="margin-left:6px">closes</span>
+        <input type="time" class="plan-input" id="closeInput" value="22:00" oninput="onCloseTimeChange()" style="max-width:120px">
+      </span>
     </div>
   </div>
 </div>
@@ -437,6 +446,17 @@ function localSearch(start, uLa, uLo, baseMs) {
       }
     }
     if (improved) continue;
+    // Or-opt-3r: same triple but inserted reversed (C,B,A instead of A,B,C)
+    oo3r: for (let i=0;i<n-2;i++) {
+      const triple=[best[i+2],best[i+1],best[i]], rest=[...best.slice(0,i),...best.slice(i+3)];
+      for (let j=0;j<=rest.length;j++) {
+        if (j===i) continue;
+        const cand=[...rest.slice(0,j),...triple,...rest.slice(j)];
+        const {cost}=evalPerm(cand,uLa,uLo,baseMs);
+        if (cost<bestCost-1) { best=cand; bestCost=cost; improved=true; break oo3r; }
+      }
+    }
+    if (improved) continue;
     // 2-opt: swap any two positions
     sw: for (let i=0;i<n;i++) for (let j=i+1;j<n;j++) {
       const cand=[...best]; [cand[i],cand[j]]=[cand[j],cand[i]];
@@ -457,8 +477,15 @@ function localSearch(start, uLa, uLo, baseMs) {
 
 function findRoute(uLa, uLo, rides, baseMs) {
   if (!rides.length) return [];
-  const best = localSearch(canonicalPerm(rides), uLa, uLo, baseMs);
-  return evalPerm(best, uLa, uLo, baseMs).steps;
+  let bestPerm = localSearch(canonicalPerm(rides), uLa, uLo, baseMs);
+  let bestCost = evalPerm(bestPerm, uLa, uLo, baseMs).cost;
+  const deadline = performance.now() + 800;
+  while (performance.now() < deadline) {
+    const perm = localSearch([...rides].sort(()=>Math.random()-.5), uLa, uLo, baseMs);
+    const {cost} = evalPerm(perm, uLa, uLo, baseMs);
+    if (cost < bestCost) { bestPerm=perm; bestCost=cost; }
+  }
+  return evalPerm(bestPerm, uLa, uLo, baseMs).steps;
 }
 
 function greedyRoute(uLa, uLo, rides, baseMs) {
@@ -486,11 +513,144 @@ let gpsPos    = null;
 let uidSeq    = 0;
 let buildTmr  = null;
 let isBuilding= false;
-let planMode  = false;
-let planTime  = null;
+let planMode   = false;
+let planTime   = null;
+let allDayMode = false;
+let closeTimeStr = '22:00';
 
 const PARK_LAT = 41.4793;
 const PARK_LON = -82.6850;
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ALL-DAY MODE — maximize time on rides before park close
+// ═══════════════════════════════════════════════════════════════════════════
+
+function toggleAllDay() {
+  allDayMode = !allDayMode;
+  const btn = document.getElementById('allDayBtn');
+  btn.textContent = allDayMode ? 'On' : 'Off';
+  btn.classList.toggle('plan-active', allDayMode);
+  document.getElementById('dayCloseWrap').style.display = allDayMode ? 'flex' : 'none';
+  buildRoute();
+}
+
+function onCloseTimeChange() {
+  closeTimeStr = document.getElementById('closeInput').value || '22:00';
+  buildRoute();
+}
+
+function getCloseMs(baseMs) {
+  const d = new Date(baseMs);
+  const [h, m] = closeTimeStr.split(':').map(Number);
+  const c = new Date(d); c.setHours(h, m, 0, 0);
+  if (c.getTime() <= baseMs) c.setDate(c.getDate() + 1);
+  return c.getTime();
+}
+
+function fillDayRoute(uLa, uLo, baseMs) {
+  let pool;
+  if (myRides.length) {
+    const seen = new Set();
+    pool = myRides.filter(r => !seen.has(r.id) && seen.add(r.id))
+      .map(r => ({id:r.id, name:r.name, dur:RIDE_DURATIONS[r.id],
+                  lat:RIDE_GPS[r.id][0], lon:RIDE_GPS[r.id][1]}));
+  } else {
+    pool = Object.entries(RIDE_NAMES).map(([id, name]) => ({
+      id:+id, name, dur:RIDE_DURATIONS[+id],
+      lat:RIDE_GPS[+id][0], lon:RIDE_GPS[+id][1],
+    }));
+  }
+  if (!pool.length) return [];
+
+  const cMs = getCloseMs(baseMs);
+
+  // Evaluate a sequence — returns total ride seconds for the longest fitting prefix
+  function evalSeq(seq) {
+    let t=0, prevId=null, prevLa=uLa, prevLo=uLo, sec=0;
+    const steps=[];
+    for (const r of seq) {
+      const d = prevId===null
+        ? haversine(prevLa,prevLo,r.lat,r.lon)*1.25
+        : walkDist(prevId,prevLa,prevLo,r.id,r.lat,r.lon);
+      const walkS=d/WALK_SPEED, t0=t+walkS, wait=forecastWait(r.id,baseMs,t0);
+      if (baseMs+(t0+wait+r.dur+BREAK_S)*1000>cMs) break;
+      steps.push({rideId:r.id,name:r.name,walkMin:walkS/60,
+        arrOff:t0,brdOff:t0+wait,exitOff:t0+wait+r.dur,waitS:wait});
+      sec+=r.dur; t=t0+wait+r.dur+BREAK_S;
+      prevId=r.id; prevLa=r.lat; prevLo=r.lon;
+    }
+    return {sec, steps};
+  }
+
+  // Build a greedy starting sequence using ride_dur/cycle_time ratio
+  function buildGreedy() {
+    const seq=[];
+    let t=0, prevId=null, prevLa=uLa, prevLo=uLo;
+    for (;;) {
+      let best=null, bScore=-1, bExit=0;
+      for (const r of pool) {
+        const d = prevId===null
+          ? haversine(prevLa,prevLo,r.lat,r.lon)*1.25
+          : walkDist(prevId,prevLa,prevLo,r.id,r.lat,r.lon);
+        const walkS=d/WALK_SPEED, t0=t+walkS, wait=forecastWait(r.id,baseMs,t0);
+        const exitT=t0+wait+r.dur+BREAK_S;
+        if (baseMs+exitT*1000>cMs) continue;
+        const score=r.dur/(walkS+wait+r.dur+BREAK_S);
+        if (score>bScore) { bScore=score; best=r; bExit=exitT; }
+      }
+      if (!best) break;
+      seq.push(best);
+      t=bExit; prevId=best.id; prevLa=best.lat; prevLo=best.lon;
+    }
+    return seq;
+  }
+
+  // Local search on a variable-length sequence: append, swap, insert (first-improvement)
+  function dayLocalSearch(initSeq) {
+    let seq=[...initSeq], best=evalSeq(seq).sec;
+    let improved=true;
+    while (improved) {
+      improved=false;
+      // Append: try extending the end with each pool ride
+      for (const r of pool) {
+        const {sec}=evalSeq([...seq,r]);
+        if (sec>best) { seq=[...seq,r]; best=sec; improved=true; }
+      }
+      if (improved) continue;
+      // Swap: replace position i with ride r (first improvement)
+      sw: for (let i=0;i<seq.length;i++) {
+        for (const r of pool) {
+          if (r===seq[i]) continue;
+          const cand=[...seq]; cand[i]=r;
+          const {sec}=evalSeq(cand);
+          if (sec>best) { seq=cand; best=sec; improved=true; break sw; }
+        }
+      }
+      if (improved) continue;
+      // Insert: add ride r before position i — improves if r.dur > displaced tail duration
+      ins: for (let i=0;i<seq.length;i++) {
+        for (const r of pool) {
+          const cand=[...seq.slice(0,i),r,...seq.slice(i)];
+          const {sec}=evalSeq(cand);
+          if (sec>best) { seq=cand; best=sec; improved=true; break ins; }
+        }
+      }
+    }
+    return {seq, sec:best};
+  }
+
+  // Multi-start: greedy seed + random restarts within 800ms budget
+  let {seq:bestSeq, sec:bestSec} = dayLocalSearch(buildGreedy());
+  const N = Math.max(bestSeq.length, pool.length);
+  const deadline = performance.now()+750;
+  while (performance.now()<deadline) {
+    const init = Array.from({length:N}, ()=>pool[Math.floor(Math.random()*pool.length)]);
+    const {seq, sec} = dayLocalSearch(init);
+    if (sec>bestSec) { bestSeq=seq; bestSec=sec; }
+  }
+
+  return evalSeq(bestSeq).steps;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  SETTINGS
@@ -634,7 +794,7 @@ function removeRide(u) {
 function scheduleBuild(ms) { clearTimeout(buildTmr); buildTmr=setTimeout(buildRoute,ms); }
 
 function buildRoute() {
-  if (!myRides.length) { routeData=null; routeUids=[]; render(); return; }
+  if (!myRides.length && !allDayMode) { routeData=null; routeUids=[]; render(); return; }
 
   let uLa, uLo, baseMs;
   if (planMode && planTime) {
@@ -648,36 +808,53 @@ function buildRoute() {
   // Defer so the spinner has a chance to paint before the CPU work starts
   setTimeout(() => {
     try {
-      const rides = myRides.map(r=>({
-        id:r.id, name:r.name,
-        dur: RIDE_DURATIONS[r.id],
-        lat: RIDE_GPS[r.id][0],
-        lon: RIDE_GPS[r.id][1],
-      }));
-
-      const steps  = findRoute(uLa, uLo, rides, baseMs);
-      const gSteps = greedyRoute(uLa, uLo, rides, baseMs);
-      const oSum   = summarize(steps);
-      const gSum   = summarize(gSteps);
-
       const fmtT = off => new Date(baseMs+off*1000)
         .toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
 
-      routeData = {
-        total_minutes: oSum.tot,
-        route: steps.map(s=>({
-          ride_id: s.rideId, name: s.name,
-          walk_minutes: +s.walkMin.toFixed(1),
-          arrive: fmtT(s.arrOff), board: fmtT(s.brdOff), exit: fmtT(s.exitOff),
-          wait_minutes: +(s.waitS/60).toFixed(1),
-        })),
-        comparison: {
-          optimized: {total_minutes:oSum.tot,walk_minutes:oSum.walk,wait_minutes:oSum.wait,ride_minutes:oSum.ride},
-          greedy:    {total_minutes:gSum.tot,walk_minutes:gSum.walk,wait_minutes:gSum.wait,ride_minutes:gSum.ride},
-          saved_minutes: +((gSum.tot-oSum.tot).toFixed(1)),
-        },
-      };
-      routeUids = mapUids(routeData.route.map(s=>s.ride_id));
+      if (allDayMode) {
+        const steps = fillDayRoute(uLa, uLo, baseMs);
+        const rideMin = steps.reduce((s,x)=>s+(x.exitOff-x.brdOff)/60, 0);
+        routeData = {
+          allDay: true,
+          total_minutes: steps.length ? steps[steps.length-1].exitOff/60 : 0,
+          ride_minutes: +rideMin.toFixed(1),
+          lap_count: steps.length,
+          route: steps.map(s=>({
+            ride_id:s.rideId, name:s.name,
+            walk_minutes:+s.walkMin.toFixed(1),
+            arrive:fmtT(s.arrOff), board:fmtT(s.brdOff), exit:fmtT(s.exitOff),
+            wait_minutes:+(s.waitS/60).toFixed(1),
+          })),
+          comparison: null,
+        };
+        routeUids = [];
+      } else {
+        const rides = myRides.map(r=>({
+          id:r.id, name:r.name,
+          dur: RIDE_DURATIONS[r.id],
+          lat: RIDE_GPS[r.id][0],
+          lon: RIDE_GPS[r.id][1],
+        }));
+        const steps  = findRoute(uLa, uLo, rides, baseMs);
+        const gSteps = greedyRoute(PARK_LAT, PARK_LON, rides, baseMs);
+        const oSum   = summarize(steps);
+        const gSum   = summarize(gSteps);
+        routeData = {
+          total_minutes: oSum.tot,
+          route: steps.map(s=>({
+            ride_id: s.rideId, name: s.name,
+            walk_minutes: +s.walkMin.toFixed(1),
+            arrive: fmtT(s.arrOff), board: fmtT(s.brdOff), exit: fmtT(s.exitOff),
+            wait_minutes: +(s.waitS/60).toFixed(1),
+          })),
+          comparison: {
+            optimized: {total_minutes:oSum.tot,walk_minutes:oSum.walk,wait_minutes:oSum.wait,ride_minutes:oSum.ride},
+            greedy:    {total_minutes:gSum.tot,walk_minutes:gSum.walk,wait_minutes:gSum.wait,ride_minutes:gSum.ride},
+            saved_minutes: +((gSum.tot-oSum.tot).toFixed(1)),
+          },
+        };
+        routeUids = mapUids(routeData.route.map(s=>s.ride_id));
+      }
     } catch(e) { console.error(e); }
     finally { isBuilding=false; showSpinner(false); render(); }
   }, 20);
@@ -701,7 +878,7 @@ function showSpinner(on) { document.getElementById('heroSpinner')?.classList.tog
 function render() {
   const area=document.getElementById('scrollArea');
 
-  if (!myRides.length) {
+  if (!myRides.length && !allDayMode) {
     document.getElementById('etaTime').textContent='—';
     document.getElementById('etaSub').textContent='add rides to start';
     area.innerHTML=`<div class="empty-state">
@@ -716,18 +893,24 @@ function render() {
   if (!routeData) {
     document.getElementById('etaTime').textContent='…';
     document.getElementById('etaSub').textContent='optimizing';
+    const buildingName = myRides.length ? myRides[0].name : 'all rides';
     area.innerHTML=`<div class="hero-card">
       <div class="hero-accent"><span class="hero-label">Next Stop</span>
         <div class="hero-spinner show" id="heroSpinner"></div></div>
-      <div class="hero-name" style="color:#9ca3af;padding:16px">${myRides[0].name}</div>
+      <div class="hero-name" style="color:#9ca3af;padding:16px">${buildingName}</div>
       <div class="hero-done"><button class="hero-done-btn" style="background:#9ca3af" disabled>Building route…</button></div>
     </div>`;
     return;
   }
 
   const steps=routeData.route, first=steps[0], rest=steps.slice(1), last=steps[steps.length-1];
-  document.getElementById('etaTime').textContent=last.exit;
-  document.getElementById('etaSub').textContent=`done (${Math.round(routeData.total_minutes)} min total)`;
+  if (routeData.allDay) {
+    document.getElementById('etaTime').textContent=`${Math.round(routeData.ride_minutes)} min`;
+    document.getElementById('etaSub').textContent=`on rides · ${routeData.lap_count} laps`;
+  } else {
+    document.getElementById('etaTime').textContent=last.exit;
+    document.getElementById('etaSub').textContent=`done (${Math.round(routeData.total_minutes)} min total)`;
+  }
 
   let html=`<div class="hero-card">
     <div class="hero-accent"><span class="hero-label">Next Stop</span>
@@ -739,10 +922,10 @@ function render() {
       <div class="chip"><div class="chip-lbl">⏳ Wait</div><div class="chip-val wait">${first.wait_minutes} min</div></div>
       <div class="chip"><div class="chip-lbl">Exit</div><div class="chip-val">${first.exit}</div></div>
     </div>
-    <div class="hero-done">
+    ${routeData.allDay ? '' : `<div class="hero-done">
       <button class="hero-done-btn" id="heroDone">Done ✓</button>
       <button class="hero-remove-btn" id="heroSkip">Skip</button>
-    </div>
+    </div>`}
   </div>`;
 
   if (rest.length) {
@@ -755,37 +938,45 @@ function render() {
           <div class="stop-name">${s.name}</div>
           <div class="stop-meta">Arrive ${s.arrive} · ${s.wait_minutes}m wait · Exit ${s.exit}</div>
         </div>
-        <button class="stop-remove" data-uid="${routeUids[i+1]}">×</button>
+        ${routeData.allDay ? '' : `<button class="stop-remove" data-uid="${routeUids[i+1]}">×</button>`}
       </div>`;
     });
   } else {
     html+=`<div class="last-stop-note">Last stop on your route 🏁</div>`;
   }
 
-  const cmp=routeData.comparison;
-  if (cmp) {
-    const saved=cmp.saved_minutes;
-    const headline = saved>0.5
-      ? `⚡ <span class="cmp-savings">${Math.round(saved)} min faster</span> than nearest-first`
-      : saved<-0.5
-        ? `Nearest-first would be <span class="cmp-neutral">${Math.round(-saved)} min faster</span> here`
-        : `<span class="cmp-neutral">Matches nearest-first</span> on this layout`;
-    const o=cmp.optimized, g=cmp.greedy;
+  if (routeData.allDay) {
     html+=`<div class="cmp-card">
-      <div class="cmp-headline">${headline}</div>
-      <table class="cmp-table">
-        <tr><th></th><th>Walk</th><th>Wait</th><th>Ride</th><th>Total</th></tr>
-        <tr class="ours"><td>Ours</td><td>${Math.round(o.walk_minutes)}m</td><td>${Math.round(o.wait_minutes)}m</td><td>${Math.round(o.ride_minutes)}m</td><td>${Math.round(o.total_minutes)}m</td></tr>
-        <tr class="naive"><td>Nearest</td><td>${Math.round(g.walk_minutes)}m</td><td>${Math.round(g.wait_minutes)}m</td><td>${Math.round(g.ride_minutes)}m</td><td>${Math.round(g.total_minutes)}m</td></tr>
-      </table>
+      <div class="cmp-headline"><span class="cmp-savings">${Math.round(routeData.ride_minutes)} min on rides</span> — ${routeData.lap_count} laps</div>
     </div>`;
+  } else {
+    const cmp=routeData.comparison;
+    if (cmp) {
+      const saved=cmp.saved_minutes;
+      const headline = saved>0.5
+        ? `⚡ <span class="cmp-savings">${Math.round(saved)} min faster</span> than nearest-first`
+        : saved<-0.5
+          ? `Nearest-first would be <span class="cmp-neutral">${Math.round(-saved)} min faster</span> here`
+          : `<span class="cmp-neutral">Matches nearest-first</span> on this layout`;
+      const o=cmp.optimized, g=cmp.greedy;
+      html+=`<div class="cmp-card">
+        <div class="cmp-headline">${headline}</div>
+        <table class="cmp-table">
+          <tr><th></th><th>Walk</th><th>Wait</th><th>Ride</th><th>Total</th></tr>
+          <tr class="ours"><td>Ours</td><td>${Math.round(o.walk_minutes)}m</td><td>${Math.round(o.wait_minutes)}m</td><td>${Math.round(o.ride_minutes)}m</td><td>${Math.round(o.total_minutes)}m</td></tr>
+          <tr class="naive"><td>Nearest</td><td>${Math.round(g.walk_minutes)}m</td><td>${Math.round(g.wait_minutes)}m</td><td>${Math.round(g.ride_minutes)}m</td><td>${Math.round(g.total_minutes)}m</td></tr>
+        </table>
+      </div>`;
+    }
   }
 
   area.innerHTML=html;
-  document.getElementById('heroDone').onclick=()=>removeRide(routeUids[0]);
-  document.getElementById('heroSkip').onclick=()=>removeRide(routeUids[0]);
-  area.querySelectorAll('.stop-remove').forEach(btn=>
-    btn.addEventListener('click',()=>removeRide(Number(btn.dataset.uid))));
+  if (!routeData.allDay) {
+    document.getElementById('heroDone').onclick=()=>removeRide(routeUids[0]);
+    document.getElementById('heroSkip').onclick=()=>removeRide(routeUids[0]);
+    area.querySelectorAll('.stop-remove').forEach(btn=>
+      btn.addEventListener('click',()=>removeRide(Number(btn.dataset.uid))));
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
